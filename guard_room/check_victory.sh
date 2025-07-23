@@ -27,7 +27,7 @@ if [ $GOBLINS -eq 0 ]; then
  echo Great work, you removed all the goblins!
 else
  echo Oh dear - there are still some goblins in the dungeon.
- echo You have lost $GOBLINS points.
+ echo Minus one point for each goblin left - you are down $GOBLINS points.
  POINTS=$(($POINTS-$GOBLINS)) 
 fi
 echo Your final score for this dungeon: $POINTS/15
