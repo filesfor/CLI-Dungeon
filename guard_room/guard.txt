@@ -15,4 +15,4 @@ pwd              - print where you are right now
 cat item         - prints the contents of an item. Use this to look for the treasure inside items.
 mv item location - moves an item to a new location. Use this to move the treasure to the guard_room and rename it.
 rm item          - removes an item. Use this only on Goblins! If you remove other things, you may lose points!
-./check_victory  - only works in the guard_room. This will print your current score.
+./check_victory.sh  - only works in the guard_room. This will print your current score.
