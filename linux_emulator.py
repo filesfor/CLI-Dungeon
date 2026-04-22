@@ -51,7 +51,23 @@ class Shell:
     # ------------------------------------------------------------------
     # Path helpers
     # ------------------------------------------------------------------
-    def real(self, virtual_path: str) -> Path:\n        \"\"\"Convert a virtual path (relative or /absolute) to a real sandbox path.\"\"\"\n        if not virtual_path:\n            return self.cwd\n        # If the path is already a real absolute path inside the sandbox, use directly\n        rp = Path(virtual_path)\n        try:\n            rp.resolve().relative_to(SANDBOX_ROOT)\n            return rp.resolve()\n        except (ValueError, OSError):\n            pass\n        # Treat POSIX-style /path as virtual absolute (even on Windows)\n        if virtual_path.startswith("/"):\n            rel = virtual_path.lstrip("/")\n            return (SANDBOX_ROOT / rel).resolve() if rel else SANDBOX_ROOT\n        else:\n            return (self.cwd / rp).resolve()
+    def real(self, virtual_path: str) -> Path:
+        """Convert a virtual path (relative or /absolute) to a real sandbox path."""
+        if not virtual_path:
+            return self.cwd
+        # If the path is already a real absolute path inside the sandbox, use directly
+        rp = Path(virtual_path)
+        try:
+            rp.resolve().relative_to(SANDBOX_ROOT)
+            return rp.resolve()
+        except (ValueError, OSError):
+            pass
+        # Treat POSIX-style /path as virtual absolute (even on Windows)
+        if virtual_path.startswith("/"):
+            rel = virtual_path.lstrip("/")
+            return (SANDBOX_ROOT / rel).resolve() if rel else SANDBOX_ROOT
+        else:
+            return (self.cwd / rp).resolve()
 
     def virtual(self, real_path: Path) -> str:
         """Convert a real sandbox path back to a virtual /path string."""
@@ -62,12 +78,12 @@ class Shell:
             return str(real_path)
 
     def _safe(self, real_path: Path) -> Path:
-        """Raise if path escapes sandbox."""
+        """Clamp path to sandbox root if it would escape."""
         try:
             real_path.relative_to(SANDBOX_ROOT)
+            return real_path
         except ValueError:
-            raise PermissionError(f"Access outside sandbox denied: {real_path}")
-        return real_path
+            return SANDBOX_ROOT
 
     # ------------------------------------------------------------------
     # Variable expansion
@@ -422,7 +438,8 @@ class Shell:
         if not args:
             self.cwd = SANDBOX_ROOT
             return ""
-        target = self._safe(self.real(args[0]))
+        resolved = self.real(args[0])
+        target = self._safe(resolved)  # clamps to SANDBOX_ROOT if outside
         if not target.exists() or not target.is_dir():
             return f"cd: {args[0]}: No such file or directory\n"
         self.cwd = target
