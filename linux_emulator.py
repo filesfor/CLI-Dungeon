@@ -34,6 +34,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 SANDBOX_ROOT = Path(__file__).resolve().parent / "sandbox"
 SANDBOX_ROOT.mkdir(exist_ok=True)
+# Keep the sandbox folder hidden on Windows so it stays out of Explorer
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetFileAttributesW(str(SANDBOX_ROOT), 0x02)  # FILE_ATTRIBUTE_HIDDEN
 
 # ---------------------------------------------------------------------------
 # Shell state
