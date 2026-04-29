@@ -50,6 +50,12 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 # Shell state
 # ---------------------------------------------------------------------------
+class ScriptExit(Exception):
+    """Raised by the exit built-in; caught by run_script_text and the REPL."""
+    def __init__(self, code=0):
+        self.code = code
+
+
 class Shell:
     def __init__(self):
         self.cwd = SANDBOX_ROOT
@@ -280,7 +286,7 @@ class Shell:
         # User-defined shell functions
         if cmd in self.functions:
             extra = {"0": cmd, **{str(i + 1): a for i, a in enumerate(args)}}
-            return self.run_script_text(self.functions[cmd], extra)
+            return self.run_script_text(self.functions[cmd], extra, restore_env=False)
 
         # ./script.sh or /abs/path
         if cmd.startswith("./") or cmd.startswith("/"):
@@ -372,51 +378,70 @@ class Shell:
     # ------------------------------------------------------------------
     # Script execution
     # ------------------------------------------------------------------
-    def run_script_text(self, text: str, extra_env: dict = None) -> str:
+    def run_script_text(self, text: str, extra_env: dict = None, restore_env: bool = True) -> str:
         """Execute multi-line shell script text inside the emulator."""
-        # Extract and register function definitions first
         text = self._extract_functions(text)
-
-        output_lines = []
-        saved_env    = dict(self.env)
+        saved_env = dict(self.env)
         if extra_env:
             self.env.update(extra_env)
+        try:
+            output = self._run_lines(text.splitlines())
+        except ScriptExit:
+            output = []
+        if restore_env:
+            self.env = saved_env
+        return "".join(output)
 
-        lines   = text.splitlines()
-        logical = self._preprocess_script(lines)
-
-        for stmt in logical:
-            stmt = stmt.strip()
-            if not stmt or stmt.startswith("#"):
-                continue
-            stmt, _ = self._resolve_command_substitutions(stmt)
-            out = self.run_line(stmt)
-            if out:
-                output_lines.append(out)
-
-        self.env = saved_env
-        return "".join(output_lines)
-
-    def _preprocess_script(self, lines):
-        result = []
+    def _run_lines(self, lines: list) -> list:
+        """Execute a list of script lines, handling if/for blocks lazily."""
+        output = []
         i = 0
         while i < len(lines):
             line = lines[i].strip()
+            if not line or line.startswith("#"):
+                i += 1
+                continue
             if re.match(r'^if\b', line):
                 block, i = self._collect_block(lines, i, 'if', 'fi')
-                result.append(("IF_BLOCK", block))
-                continue
-            if re.match(r'^for\b', line):
+                branch = self._expand_if(block)
+                output.extend(self._run_lines(branch))
+            elif re.match(r'^for\b', line):
                 block, i = self._collect_block(lines, i, 'for', 'done')
-                result.append(("FOR_BLOCK", block))
-                continue
-            if re.match(r'^while\b', line):
+                output.extend(self._run_for_block(block))
+            elif re.match(r'^while\b', line):
                 block, i = self._collect_block(lines, i, 'while', 'done')
-                result.append(("WHILE_BLOCK", block))
-                continue
-            result.append(line)
-            i += 1
-        return self._execute_preprocessed(result)
+                # no-op: while loops not needed for CLI Dungeon
+                pass
+            else:
+                line, _ = self._resolve_command_substitutions(line)
+                try:
+                    out = self.run_line(line)
+                except ScriptExit:
+                    raise
+                if out:
+                    output.append(out)
+                i += 1
+        return output
+
+    def _run_for_block(self, block: list) -> list:
+        """Execute a for loop block with current env variable values."""
+        lines = [l.strip() for l in block]
+        m = re.match(r'for\s+(\w+)\s+in\s+(.+?)(?:;|\s*$)', lines[0])
+        if not m:
+            return []
+        var       = m.group(1)
+        items_str = self.expand(m.group(2)).strip()
+        range_m   = re.match(r'\{(\d+)\.\.(\d+)\}', items_str)
+        if range_m:
+            items = list(range(int(range_m.group(1)), int(range_m.group(2)) + 1))
+        else:
+            items = items_str.split()
+        body = [l for l in lines[1:] if l.strip() not in ('do', 'done')]
+        output = []
+        for val in items:
+            iter_body = [re.sub(r'\$\{?' + var + r'\}?', str(val), l) for l in body]
+            output.extend(self._run_lines(iter_body))
+        return output
 
     def _collect_block(self, lines, start, open_kw, close_kw):
         block = [lines[start]]
@@ -429,18 +454,6 @@ class Shell:
             block.append(lines[i])
             i += 1
         return block, i
-
-    def _execute_preprocessed(self, items):
-        result = []
-        for item in items:
-            if isinstance(item, tuple):
-                kind, block = item
-                if   kind == "IF_BLOCK":    result.extend(self._expand_if(block))
-                elif kind == "FOR_BLOCK":   result.extend(self._expand_for(block))
-                elif kind == "WHILE_BLOCK": result.extend(self._expand_while(block))
-            else:
-                result.append(item)
-        return result
 
     def _expand_if(self, block):
         lines     = [l.strip() for l in block]
@@ -456,12 +469,23 @@ class Shell:
                 condition = bool(out.strip())
 
         then_lines, else_lines, in_else = [], [], False
+        depth = 0   # track nested if depth so inner fi does not terminate the scan
         for l in lines[1:]:
-            if l in ('then', 'else'):
-                if l == 'else': in_else = True
+            import re as _re
+            if _re.match(r"^if\b", l):
+                depth += 1
+                (else_lines if in_else else then_lines).append(l)
+            elif _re.match(r"^fi\b", l):
+                if depth == 0:
+                    break           # this fi closes the current if — done
+                depth -= 1
+                (else_lines if in_else else then_lines).append(l)
+            elif depth == 0 and l == 'then':
                 continue
-            if l == 'fi': break
-            (else_lines if in_else else then_lines).append(l)
+            elif depth == 0 and l == 'else':
+                in_else = True
+            else:
+                (else_lines if in_else else then_lines).append(l)
         return then_lines if condition else else_lines
 
     def _eval_condition(self, expr: str) -> bool:
@@ -484,35 +508,12 @@ class Shell:
         if m: return m.group(1) != m.group(2)
         return False
 
-    def _expand_for(self, block):
-        lines  = [l.strip() for l in block]
-        m      = re.match(r'for\s+(\w+)\s+in\s+(.+?)(?:;|\s*$)', lines[0])
-        if not m: return []
-        var        = m.group(1)
-        items_str  = self.expand(m.group(2)).strip()
-        # Handle {A..B} range (including dynamic values after expansion)
-        range_m = re.match(r'\{(\d+)\.\.(\d+)\}', items_str)
-        if range_m:
-            items = list(range(int(range_m.group(1)), int(range_m.group(2)) + 1))
-        else:
-            items = items_str.split()
-        body   = [l for l in lines[1:] if l not in ('do', 'done')]
-        result = []
-        for val in items:
-            for l in body:
-                result.append(re.sub(r'\$\{?' + var + r'\}?', str(val), l))
-        return result
-
-    def _expand_while(self, block):
-        # Not needed for CLI Dungeon scripts; no-op to avoid crashes
-        return []
-
     def _resolve_command_substitutions(self, line: str):
-        """Replace `cmd` and $(cmd) with their output."""
+        """Replace `cmd` and $(cmd) with their output. Skips $((...)) arithmetic."""
         def replacer(m):
             inner = m.group(1) or m.group(2)
             return self._run_command_capture(inner).strip()
-        line = re.sub(r'`([^`]+)`|\$\(([^)]+)\)', replacer, line)
+        line = re.sub(r'`([^`]+)`|\$\((?!\()([^)]+)\)', replacer, line)
         return line, {}
 
     def _run_command_capture(self, cmd_str: str) -> str:
@@ -822,8 +823,8 @@ class Shell:
         return text
 
     def _exit(self, args):
-        print("\nGoodbye!")
-        sys.exit(0)
+        code = int(args[0]) if args else 0
+        raise ScriptExit(code)
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +856,11 @@ def main():
         if not line:
             continue
 
-        out = shell.run_line(line)
+        try:
+            out = shell.run_line(line)
+        except ScriptExit:
+            print("\nGoodbye!")
+            break
         if out:
             print(out, end="" if out.endswith("\n") else "\n")
 
